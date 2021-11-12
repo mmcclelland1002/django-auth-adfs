@@ -6,17 +6,17 @@ from xml.etree import ElementTree
 
 import requests
 import requests.adapters
-from urllib3.util.retry import Retry
 from cryptography.hazmat.backends.openssl.backend import backend
 from cryptography.x509 import load_der_x509_certificate
+from django.apps import apps
 from django.conf import settings as django_settings
-from django.contrib.auth import REDIRECT_FIELD_NAME
-from django.contrib.auth import get_user_model
+from django.contrib.auth import REDIRECT_FIELD_NAME, get_user_model
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connection
 from django.http import QueryDict
 from django.shortcuts import render
 from django.utils.module_loading import import_string
-from django.apps import apps
+from urllib3.util.retry import Retry
 
 try:
     from django.urls import reverse
@@ -29,6 +29,7 @@ AZURE_AD_SERVER = "login.microsoftonline.com"
 DEFAULT_SETTINGS_CLASS = 'django_auth_adfs.config.Settings'
 DEFAULT_AD_CONFIG_MODEL = "django_auth_adfs.models.ActiveDirectoryConfig"
 USE_MODEL_SETTINGS = django_settings.AUTH_ADFS_MODEL_SETTINGS if hasattr(django_settings, "AUTH_ADFS_MODEL_SETTINGS") else False
+POST_MIGRATION = len(connection.introspection.table_names())
 
 class ConfigLoadError(Exception):
     pass
@@ -80,21 +81,25 @@ class Settings(object):
 
         self.VERSION = 'v1.0'
 
-        if USE_MODEL_SETTINGS:
-            cls = django_settings.DEFAULT_AD_CONFIG_MODEL if hasattr(django_settings, "DEFAULT_AD_CONFIG_MODEL") else DEFAULT_AD_CONFIG_MODEL
+        cls = django_settings.DEFAULT_AD_CONFIG_MODEL if hasattr(django_settings, "DEFAULT_AD_CONFIG_MODEL") else DEFAULT_AD_CONFIG_MODEL
+        table_name = cls.replace(".model.", "_").lower()
+        if USE_MODEL_SETTINGS and not POST_MIGRATION:
+            return
+        elif USE_MODEL_SETTINGS:
             model_cls = import_string(cls)
             model_config = model_cls.objects.first()
-            self.SERVER = AZURE_AD_SERVER
-            self.TENANT_ID = model_config.tenant_id
-            self.CLIENT_ID = model_config.client_id
-            self.CLIENT_SECRET = model_config.client_secret
-            self.AUDIENCE = model_config.client_id
-            self.RELYING_PARTY_ID = model_config.client_id
-            self.USERNAME_CLAIM = model_config.username_claim
-            self.GROUPS_CLAIM = model_config.groups_claim
-            self.CLAIM_MAPPING = {"first_name": "given_name",
-                                "last_name": "family_name",
-                                "email": "email"}
+            if model_config:
+                self.SERVER = AZURE_AD_SERVER
+                self.TENANT_ID = model_config.tenant_id
+                self.CLIENT_ID = model_config.client_id
+                self.CLIENT_SECRET = model_config.client_secret
+                self.AUDIENCE = model_config.client_id
+                self.RELYING_PARTY_ID = model_config.client_id
+                self.USERNAME_CLAIM = model_config.username_claim
+                self.GROUPS_CLAIM = model_config.groups_claim
+                self.CLAIM_MAPPING = {"first_name": "given_name",
+                                    "last_name": "family_name",
+                                    "email": "email"}
 
         else:
             required_settings = [
@@ -215,10 +220,10 @@ class ProviderConfig(object):
         self.session.mount('https://', adapter)
         self.session.verify = settings.CA_BUNDLE
 
-    def load_config(self):
+    def load_config(self, force_reload=False):
         # If loaded data is too old, reload it again
         refresh_time = datetime.now() - timedelta(hours=settings.CONFIG_RELOAD_INTERVAL)
-        if self._config_timestamp is None or self._config_timestamp < refresh_time:
+        if self._config_timestamp is None or self._config_timestamp < refresh_time or force_reload:
             logger.debug("Loading django_auth_adfs ID Provider configuration.")
             try:
                 loaded = self._load_openid_config()
