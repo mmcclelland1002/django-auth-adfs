@@ -27,3 +27,7 @@ class ActiveDirectoryConfig(models.Model):
 
     def __str__(self) -> str:
         return self.tenant_id
+
+    class Meta:
+        verbose_name = "Active Directory config"
+        verbose_name_plural = "Active Directory config"
