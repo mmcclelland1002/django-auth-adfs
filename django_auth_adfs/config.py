@@ -16,6 +16,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import QueryDict
 from django.shortcuts import render
 from django.utils.module_loading import import_string
+from django.apps import apps
 
 try:
     from django.urls import reverse
@@ -26,7 +27,7 @@ logger = logging.getLogger("django_auth_adfs")
 
 AZURE_AD_SERVER = "login.microsoftonline.com"
 DEFAULT_SETTINGS_CLASS = 'django_auth_adfs.config.Settings'
-
+DEFAULT_AD_CONFIG_MODEL = "django_auth_adfs.models.ActiveDirectoryConfig"
 
 class ConfigLoadError(Exception):
     pass
@@ -78,95 +79,114 @@ class Settings(object):
 
         self.VERSION = 'v1.0'
 
-        required_settings = [
-            "AUDIENCE",
-            "CLIENT_ID",
-            "RELYING_PARTY_ID",
-            "USERNAME_CLAIM",
-        ]
+        USE_MODEL_SETTINGS = django_settings.AUTH_ADFS_MODEL_SETTINGS if hasattr(django_settings, "AUTH_ADFS_MODEL_SETTINGS") else False
 
-        deprecated_settings = {
-            "AUTHORIZE_PATH": "This setting is automatically loaded from ADFS.",
-            "ISSUER": "This setting is automatically loaded from ADFS.",
-            "LOGIN_REDIRECT_URL": "Instead use the standard Django settings with the same name.",
-            "REDIR_URI": "This setting is automatically determined based on the URL configuration of Django.",
-            "SIGNING_CERT": "The token signing certificates are automatically loaded from ADFS.",
-            "TOKEN_PATH": "This setting is automatically loaded from ADFS.",
-        }
-
-        if not hasattr(django_settings, "AUTH_ADFS"):
-            msg = "The configuration directive 'AUTH_ADFS' was not found in your Django settings"
-            raise ImproperlyConfigured(msg)
-        _settings = django_settings.AUTH_ADFS
-        # Settings class is loaded by now. Delete this setting
-        if "SETTINGS_CLASS" in _settings:
-            del _settings["SETTINGS_CLASS"]
-
-        # Handle deprecated settings
-        for setting, message in deprecated_settings.items():
-            if setting in _settings:
-                warnings.warn("Setting {} is deprecated and it's value was ignored. {}".format(setting, message),
-                              DeprecationWarning)
-                del _settings[setting]
-
-        if "CERT_MAX_AGE" in _settings:
-            _settings["CONFIG_RELOAD_INTERVAL"] = _settings["CERT_MAX_AGE"]
-            warnings.warn('Setting CERT_MAX_AGE has been renamed to CONFIG_RELOAD_INTERVAL. The value was copied.',
-                          DeprecationWarning)
-            del _settings["CERT_MAX_AGE"]
-
-        if "GROUP_CLAIM" in _settings:
-            _settings["GROUPS_CLAIM"] = _settings["GROUP_CLAIM"]
-            warnings.warn('Setting GROUP_CLAIM has been renamed to GROUPS_CLAIM. The value was copied.',
-                          DeprecationWarning)
-            del _settings["GROUP_CLAIM"]
-
-        if "RESOURCE" in _settings:
-            _settings["RELYING_PARTY_ID"] = _settings["RESOURCE"]
-            del _settings["RESOURCE"]
-        if "TENANT_ID" in _settings:
-            # If a tenant ID was set, switch to Azure AD mode
-            if "SERVER" in _settings:
-                raise ImproperlyConfigured("The SERVER cannot be set when TENANT_ID is set.")
+        if USE_MODEL_SETTINGS:
+            cls = django_settings.DEFAULT_AD_CONFIG_MODEL if hasattr(django_settings, "DEFAULT_AD_CONFIG_MODEL") else DEFAULT_AD_CONFIG_MODEL
+            model_cls = import_string(cls)
+            model_config = model_cls.objects.first()
             self.SERVER = AZURE_AD_SERVER
-            self.USERNAME_CLAIM = "upn"
-            self.GROUPS_CLAIM = "groups"
+            self.TENANT_ID = model_config.tenant_id
+            self.CLIENT_ID = model_config.client_id
+            self.CLIENT_SECRET = model_config.client_secret
+            self.AUDIENCE = model_config.client_id
+            self.RELYING_PARTY_ID = model_config.client_id
+            self.USERNAME_CLAIM = model_config.username_claim
+            self.GROUPS_CLAIM = model_config.groups_claim
             self.CLAIM_MAPPING = {"first_name": "given_name",
-                                  "last_name": "family_name",
-                                  "email": "email"}
-        elif "VERSION" in _settings:
-            raise ImproperlyConfigured("The VERSION cannot be set when TENANT_ID is set.")
+                                "last_name": "family_name",
+                                "email": "email"}
 
-        # Overwrite defaults with user settings
-        for setting, value in _settings.items():
-            if hasattr(self, setting):
-                setattr(self, setting, value)
-            else:
-                msg = "'{0}' is not a valid configuration directive for django_auth_adfs."
-                raise ImproperlyConfigured(msg.format(setting))
+        else:
+            required_settings = [
+                "AUDIENCE",
+                "CLIENT_ID",
+                "RELYING_PARTY_ID",
+                "USERNAME_CLAIM",
+            ]
 
-        if self.SERVER != AZURE_AD_SERVER and self.BLOCK_GUEST_USERS:
-            raise ImproperlyConfigured("You can only set BLOCK_GUEST_USERS when self.TENANT_ID is set")
+            deprecated_settings = {
+                "AUTHORIZE_PATH": "This setting is automatically loaded from ADFS.",
+                "ISSUER": "This setting is automatically loaded from ADFS.",
+                "LOGIN_REDIRECT_URL": "Instead use the standard Django settings with the same name.",
+                "REDIR_URI": "This setting is automatically determined based on the URL configuration of Django.",
+                "SIGNING_CERT": "The token signing certificates are automatically loaded from ADFS.",
+                "TOKEN_PATH": "This setting is automatically loaded from ADFS.",
+            }
 
-        if self.TENANT_ID is None:
-            # For on premises ADFS, the tenant ID is set to adfs
-            # On AzureAD the adfs part in the URL happens to be replace by the tenant ID.
-            self.TENANT_ID = "adfs"
-
-        for setting in required_settings:
-            if not getattr(self, setting):
-                msg = "django_auth_adfs setting '{0}' has not been set".format(setting)
+            if not hasattr(django_settings, "AUTH_ADFS"):
+                msg = "The configuration directive 'AUTH_ADFS' was not found in your Django settings"
                 raise ImproperlyConfigured(msg)
+            _settings = django_settings.AUTH_ADFS
+            # Settings class is loaded by now. Delete this setting
+            if "SETTINGS_CLASS" in _settings:
+                del _settings["SETTINGS_CLASS"]
 
-        # Setup dynamic settings
-        if not callable(self.CUSTOM_FAILED_RESPONSE_VIEW):
-            self.CUSTOM_FAILED_RESPONSE_VIEW = import_string(self.CUSTOM_FAILED_RESPONSE_VIEW)
+            # Handle deprecated settings
+            for setting, message in deprecated_settings.items():
+                if setting in _settings:
+                    warnings.warn("Setting {} is deprecated and it's value was ignored. {}".format(setting, message),
+                                DeprecationWarning)
+                    del _settings[setting]
 
-        # Validate setting conflicts
-        usermodel = get_user_model()
-        if usermodel.USERNAME_FIELD in self.CLAIM_MAPPING:
-            raise ImproperlyConfigured("You cannot set the username field of the user model from "
-                                       "the CLAIM_MAPPING setting. Instead use the USERNAME_CLAIM setting.")
+            if "CERT_MAX_AGE" in _settings:
+                _settings["CONFIG_RELOAD_INTERVAL"] = _settings["CERT_MAX_AGE"]
+                warnings.warn('Setting CERT_MAX_AGE has been renamed to CONFIG_RELOAD_INTERVAL. The value was copied.',
+                            DeprecationWarning)
+                del _settings["CERT_MAX_AGE"]
+
+            if "GROUP_CLAIM" in _settings:
+                _settings["GROUPS_CLAIM"] = _settings["GROUP_CLAIM"]
+                warnings.warn('Setting GROUP_CLAIM has been renamed to GROUPS_CLAIM. The value was copied.',
+                            DeprecationWarning)
+                del _settings["GROUP_CLAIM"]
+
+            if "RESOURCE" in _settings:
+                _settings["RELYING_PARTY_ID"] = _settings["RESOURCE"]
+                del _settings["RESOURCE"]
+            if "TENANT_ID" in _settings:
+                # If a tenant ID was set, switch to Azure AD mode
+                if "SERVER" in _settings:
+                    raise ImproperlyConfigured("The SERVER cannot be set when TENANT_ID is set.")
+                self.SERVER = AZURE_AD_SERVER
+                self.USERNAME_CLAIM = "upn"
+                self.GROUPS_CLAIM = "groups"
+                self.CLAIM_MAPPING = {"first_name": "given_name",
+                                    "last_name": "family_name",
+                                    "email": "email"}
+            elif "VERSION" in _settings:
+                raise ImproperlyConfigured("The VERSION cannot be set when TENANT_ID is set.")
+
+            # Overwrite defaults with user settings
+            for setting, value in _settings.items():
+                if hasattr(self, setting):
+                    setattr(self, setting, value)
+                else:
+                    msg = "'{0}' is not a valid configuration directive for django_auth_adfs."
+                    raise ImproperlyConfigured(msg.format(setting))
+
+            if self.SERVER != AZURE_AD_SERVER and self.BLOCK_GUEST_USERS:
+                raise ImproperlyConfigured("You can only set BLOCK_GUEST_USERS when self.TENANT_ID is set")
+
+            if self.TENANT_ID is None:
+                # For on premises ADFS, the tenant ID is set to adfs
+                # On AzureAD the adfs part in the URL happens to be replace by the tenant ID.
+                self.TENANT_ID = "adfs"
+
+            for setting in required_settings:
+                if not getattr(self, setting):
+                    msg = "django_auth_adfs setting '{0}' has not been set".format(setting)
+                    raise ImproperlyConfigured(msg)
+
+            # Setup dynamic settings
+            if not callable(self.CUSTOM_FAILED_RESPONSE_VIEW):
+                self.CUSTOM_FAILED_RESPONSE_VIEW = import_string(self.CUSTOM_FAILED_RESPONSE_VIEW)
+
+            # Validate setting conflicts
+            usermodel = get_user_model()
+            if usermodel.USERNAME_FIELD in self.CLAIM_MAPPING:
+                raise ImproperlyConfigured("You cannot set the username field of the user model from "
+                                        "the CLAIM_MAPPING setting. Instead use the USERNAME_CLAIM setting.")
 
 
 class ProviderConfig(object):
