@@ -28,6 +28,7 @@ logger = logging.getLogger("django_auth_adfs")
 AZURE_AD_SERVER = "login.microsoftonline.com"
 DEFAULT_SETTINGS_CLASS = 'django_auth_adfs.config.Settings'
 DEFAULT_AD_CONFIG_MODEL = "django_auth_adfs.models.ActiveDirectoryConfig"
+USE_MODEL_SETTINGS = django_settings.AUTH_ADFS_MODEL_SETTINGS if hasattr(django_settings, "AUTH_ADFS_MODEL_SETTINGS") else False
 
 class ConfigLoadError(Exception):
     pass
@@ -37,10 +38,10 @@ def _get_settings_class():
     """
     Get the AUTH_ADFS setting from the Django settings.
     """
-    if not hasattr(django_settings, "AUTH_ADFS"):
+    if not USE_MODEL_SETTINGS and not hasattr(django_settings, "AUTH_ADFS"):
         msg = "The configuration directive 'AUTH_ADFS' was not found in your Django settings"
         raise ImproperlyConfigured(msg)
-    cls = django_settings.AUTH_ADFS.get('SETTINGS_CLASS', DEFAULT_SETTINGS_CLASS)
+    cls = django_settings.AUTH_ADFS.get('SETTINGS_CLASS', DEFAULT_SETTINGS_CLASS) if hasattr(django_settings, "AUTH_ADFS") else DEFAULT_SETTINGS_CLASS
     return import_string(cls)
 
 
@@ -78,8 +79,6 @@ class Settings(object):
         )
 
         self.VERSION = 'v1.0'
-
-        USE_MODEL_SETTINGS = django_settings.AUTH_ADFS_MODEL_SETTINGS if hasattr(django_settings, "AUTH_ADFS_MODEL_SETTINGS") else False
 
         if USE_MODEL_SETTINGS:
             cls = django_settings.DEFAULT_AD_CONFIG_MODEL if hasattr(django_settings, "DEFAULT_AD_CONFIG_MODEL") else DEFAULT_AD_CONFIG_MODEL
