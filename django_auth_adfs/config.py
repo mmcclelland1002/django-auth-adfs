@@ -195,6 +195,9 @@ class Settings(object):
 
 class ProviderConfig(object):
     def __init__(self):
+        settings_cls = _get_settings_class()
+        self.settings = settings_cls()
+
         self._config_timestamp = None
         self._mode = None
 
@@ -203,27 +206,31 @@ class ProviderConfig(object):
         self.token_endpoint = None
         self.end_session_endpoint = None
         self.issuer = None
-
+        
         allowed_methods = frozenset([
             'HEAD', 'GET', 'PUT', 'DELETE', 'OPTIONS', 'TRACE', 'POST'
         ])
 
         retry = Retry(
-            total=settings.RETRIES,
-            read=settings.RETRIES,
-            connect=settings.RETRIES,
+            total=self.settings.RETRIES,
+            read=self.settings.RETRIES,
+            connect=self.settings.RETRIES,
             backoff_factor=0.3,
             allowed_methods=allowed_methods
         )
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(max_retries=retry)
         self.session.mount('https://', adapter)
-        self.session.verify = settings.CA_BUNDLE
+        self.session.verify = self.settings.CA_BUNDLE
 
     def load_config(self, force_reload=False):
         # If loaded data is too old, reload it again
-        refresh_time = datetime.now() - timedelta(hours=settings.CONFIG_RELOAD_INTERVAL)
+        refresh_time = datetime.now() - timedelta(hours=self.settings.CONFIG_RELOAD_INTERVAL)
         if self._config_timestamp is None or self._config_timestamp < refresh_time or force_reload:
+            # reload settings
+            settings_cls = _get_settings_class()
+            self.settings = settings_cls()
+
             logger.debug("Loading django_auth_adfs ID Provider configuration.")
             try:
                 loaded = self._load_openid_config()
@@ -252,22 +259,22 @@ class ProviderConfig(object):
             logger.info("issuer:                 %s", self.issuer)
 
     def _load_openid_config(self):
-        if settings.VERSION != 'v1.0':
+        if self.settings.VERSION != 'v1.0':
             config_url = "https://{}/{}/{}/.well-known/openid-configuration?appid={}".format(
-                settings.SERVER, settings.TENANT_ID, settings.VERSION, settings.CLIENT_ID
+                self.settings.SERVER, self.settings.TENANT_ID, self.settings.VERSION, self.settings.CLIENT_ID
             )
         else:
             config_url = "https://{}/{}/.well-known/openid-configuration?appid={}".format(
-                settings.SERVER, settings.TENANT_ID, settings.CLIENT_ID
+                self.settings.SERVER, self.settings.TENANT_ID, self.settings.CLIENT_ID
             )
 
         try:
             logger.info("Trying to get OpenID Connect config from %s", config_url)
-            response = self.session.get(config_url, timeout=settings.TIMEOUT)
+            response = self.session.get(config_url, timeout=self.settings.TIMEOUT)
             response.raise_for_status()
             openid_cfg = response.json()
 
-            response = self.session.get(openid_cfg["jwks_uri"], timeout=settings.TIMEOUT)
+            response = self.session.get(openid_cfg["jwks_uri"], timeout=self.settings.TIMEOUT)
             response.raise_for_status()
             signing_certificates = [x["x5c"][0] for x in response.json()["keys"] if x.get("use", "sig") == "sig"]
             #                               ^^^
@@ -281,7 +288,7 @@ class ProviderConfig(object):
             self.authorization_endpoint = openid_cfg["authorization_endpoint"]
             self.token_endpoint = openid_cfg["token_endpoint"]
             self.end_session_endpoint = openid_cfg["end_session_endpoint"]
-            if settings.TENANT_ID != 'adfs':
+            if self.settings.TENANT_ID != 'adfs':
                 self.issuer = openid_cfg["issuer"]
             else:
                 self.issuer = openid_cfg["access_token_issuer"]
@@ -290,16 +297,16 @@ class ProviderConfig(object):
         return True
 
     def _load_federation_metadata(self):
-        server_url = "https://{}".format(settings.SERVER)
-        base_url = "{}/{}".format(server_url, settings.TENANT_ID)
-        if settings.TENANT_ID == "adfs":
+        server_url = "https://{}".format(self.settings.SERVER)
+        base_url = "{}/{}".format(server_url, self.settings.TENANT_ID)
+        if self.settings.TENANT_ID == "adfs":
             adfs_config_url = server_url + "/FederationMetadata/2007-06/FederationMetadata.xml"
         else:
             adfs_config_url = base_url + "/FederationMetadata/2007-06/FederationMetadata.xml"
 
         try:
             logger.info("Trying to get ADFS Metadata file %s", adfs_config_url)
-            response = self.session.get(adfs_config_url, timeout=settings.TIMEOUT)
+            response = self.session.get(adfs_config_url, timeout=self.settings.TIMEOUT)
             response.raise_for_status()
         except requests.HTTPError:
             raise ConfigLoadError
@@ -355,14 +362,14 @@ class ProviderConfig(object):
         query = QueryDict(mutable=True)
         query.update({
             "response_type": "code",
-            "client_id": settings.CLIENT_ID,
-            "resource": settings.RELYING_PARTY_ID,
+            "client_id": self.settings.CLIENT_ID,
+            "resource": self.settings.RELYING_PARTY_ID,
             "redirect_uri": self.redirect_uri(request),
             "state": redirect_to,
         })
         if self._mode == "openid_connect":
             query["scope"] = "openid"
-            if (disable_sso is None and settings.DISABLE_SSO) or disable_sso is True:
+            if (disable_sso is None and self.settings.DISABLE_SSO) or disable_sso is True:
                 query["prompt"] = "login"
             if force_mfa:
                 query["amr_values"] = "ngcmfa"
@@ -381,6 +388,4 @@ class ProviderConfig(object):
         return self.end_session_endpoint
 
 
-settings_cls = _get_settings_class()
-settings = settings_cls()
 provider_config = ProviderConfig()

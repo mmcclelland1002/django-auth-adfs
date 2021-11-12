@@ -7,7 +7,7 @@ from django.contrib.auth.models import Group
 from django.core.exceptions import ImproperlyConfigured, ObjectDoesNotExist, PermissionDenied
 
 from django_auth_adfs import signals
-from django_auth_adfs.config import provider_config, settings
+from django_auth_adfs.config import provider_config
 from django_auth_adfs.exceptions import MFARequired
 
 logger = logging.getLogger("django_auth_adfs")
@@ -18,15 +18,15 @@ class AdfsBaseBackend(ModelBackend):
         logger.debug("Received authorization code: %s", authorization_code)
         data = {
             'grant_type': 'authorization_code',
-            'client_id': settings.CLIENT_ID,
+            'client_id': provider_config.settings.CLIENT_ID,
             'redirect_uri': provider_config.redirect_uri(request),
             'code': authorization_code,
         }
-        if settings.CLIENT_SECRET:
-            data['client_secret'] = settings.CLIENT_SECRET
+        if provider_config.settings.CLIENT_SECRET:
+            data['client_secret'] = provider_config.settings.CLIENT_SECRET
 
         logger.debug("Getting access token at: %s", provider_config.token_endpoint)
-        response = provider_config.session.post(provider_config.token_endpoint, data, timeout=settings.TIMEOUT)
+        response = provider_config.session.post(provider_config.token_endpoint, data, timeout=provider_config.settings.TIMEOUT)
         # 200 = valid token received
         # 400 = 'something' is wrong in our request
         if response.status_code == 400:
@@ -65,10 +65,10 @@ class AdfsBaseBackend(ModelBackend):
                     access_token,
                     key=key,
                     algorithms=['RS256', 'RS384', 'RS512'],
-                    audience=settings.AUDIENCE,
+                    audience=provider_config.settings.AUDIENCE,
                     issuer=provider_config.issuer,
                     options=options,
-                    leeway=settings.JWT_LEEWAY
+                    leeway=provider_config.settings.JWT_LEEWAY
                 )
             except jwt.ExpiredSignatureError as error:
                 logger.info("Signature has expired: %s", error)
@@ -91,9 +91,9 @@ class AdfsBaseBackend(ModelBackend):
         logger.debug("Received access token: %s", access_token)
         claims = self.validate_access_token(access_token)
         if (
-            settings.BLOCK_GUEST_USERS
+            provider_config.settings.BLOCK_GUEST_USERS
             and claims.get('tid')
-            != settings.TENANT_ID
+            != provider_config.settings.TENANT_ID
         ):
             logger.info('Guest user denied')
             raise PermissionDenied
@@ -127,15 +127,15 @@ class AdfsBaseBackend(ModelBackend):
             django.contrib.auth.models.User: A Django user
         """
         # Create the user
-        username_claim = settings.USERNAME_CLAIM
-        guest_username_claim = settings.GUEST_USERNAME_CLAIM
+        username_claim = provider_config.settings.USERNAME_CLAIM
+        guest_username_claim = provider_config.settings.GUEST_USERNAME_CLAIM
         usermodel = get_user_model()
 
         if (
             guest_username_claim
             and not claims.get(username_claim)
-            and not settings.BLOCK_GUEST_USERS
-            and claims.get('tid') != settings.TENANT_ID
+            and not provider_config.settings.BLOCK_GUEST_USERS
+            and claims.get('tid') != provider_config.settings.TENANT_ID
         ):
             username_claim = guest_username_claim
 
@@ -149,7 +149,7 @@ class AdfsBaseBackend(ModelBackend):
         try:
             user = usermodel.objects.get(**userdata)
         except usermodel.DoesNotExist:
-            if settings.CREATE_NEW_USERS:
+            if provider_config.settings.CREATE_NEW_USERS:
                 user = usermodel.objects.create(**userdata)
                 logger.debug("User '%s' has been created.", claims[username_claim])
             else:
@@ -170,7 +170,7 @@ class AdfsBaseBackend(ModelBackend):
 
         required_fields = [field.name for field in user._meta.fields if field.blank is False]
 
-        for field, claim in settings.CLAIM_MAPPING.items():
+        for field, claim in provider_config.settings.CLAIM_MAPPING.items():
             if hasattr(user, field):
                 if claim in claims:
                     setattr(user, field, claims[claim])
@@ -195,23 +195,23 @@ class AdfsBaseBackend(ModelBackend):
             user (django.contrib.auth.models.User): User model instance
             claims (dict): Claims from the access token
         """
-        if settings.GROUPS_CLAIM is not None:
+        if provider_config.settings.GROUPS_CLAIM is not None:
             # Update the user's group memberships
             django_groups = [group.name for group in user.groups.all()]
 
-            if settings.GROUPS_CLAIM in claims:
-                claim_groups = claims[settings.GROUPS_CLAIM]
+            if provider_config.settings.GROUPS_CLAIM in claims:
+                claim_groups = claims[provider_config.settings.GROUPS_CLAIM]
                 if not isinstance(claim_groups, list):
                     claim_groups = [claim_groups, ]
             else:
                 logger.debug("The configured groups claim '%s' was not found in the access token",
-                             settings.GROUPS_CLAIM)
+                             provider_config.settings.GROUPS_CLAIM)
                 claim_groups = []
             if sorted(claim_groups) != sorted(django_groups):
                 existing_groups = list(Group.objects.filter(name__in=claim_groups).iterator())
                 existing_group_names = frozenset(group.name for group in existing_groups)
                 new_groups = []
-                if settings.MIRROR_GROUPS:
+                if provider_config.settings.MIRROR_GROUPS:
                     new_groups = [
                         Group.objects.get_or_create(name=name)[0]
                         for name in claim_groups
@@ -235,16 +235,16 @@ class AdfsBaseBackend(ModelBackend):
             user (django.contrib.auth.models.User): User model instance
             claims (dict): Claims from the access token
         """
-        if settings.GROUPS_CLAIM is not None:
-            if settings.GROUPS_CLAIM in claims:
-                access_token_groups = claims[settings.GROUPS_CLAIM]
+        if provider_config.settings.GROUPS_CLAIM is not None:
+            if provider_config.settings.GROUPS_CLAIM in claims:
+                access_token_groups = claims[provider_config.settings.GROUPS_CLAIM]
                 if not isinstance(access_token_groups, list):
                     access_token_groups = [access_token_groups, ]
             else:
                 logger.debug("The configured group claim was not found in the access token")
                 access_token_groups = []
 
-            for flag, group in settings.GROUP_TO_FLAG_MAPPING.items():
+            for flag, group in provider_config.settings.GROUP_TO_FLAG_MAPPING.items():
                 if hasattr(user, flag):
                     if not isinstance(group, list):
                         group = [group]
@@ -259,7 +259,7 @@ class AdfsBaseBackend(ModelBackend):
                     msg = "User model has no field named '{}'. Check ADFS boolean claims mapping."
                     raise ImproperlyConfigured(msg.format(flag))
 
-        for field, claim in settings.BOOLEAN_CLAIM_MAPPING.items():
+        for field, claim in provider_config.settings.BOOLEAN_CLAIM_MAPPING.items():
             if hasattr(user, field):
                 bool_val = False
                 if claim in claims and str(claims[claim]).lower() in ['y', 'yes', 't', 'true', 'on', '1']:

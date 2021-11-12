@@ -1,7 +1,5 @@
 from django.db import models
 
-from django_auth_adfs.config import provider_config
-
 
 class ActiveDirectoryConfig(models.Model):
     DIRECTORY_ROLES = "roles"
@@ -29,9 +27,10 @@ class ActiveDirectoryConfig(models.Model):
     def __str__(self) -> str:
         return self.tenant_id or ""
 
-    def save(*args, **kwargs):
-        provider_config.load_config(force_reload=True)
+    def save(self,*args, **kwargs):
         super().save(*args, **kwargs)
+        from django_auth_adfs.config import provider_config
+        provider_config.load_config(force_reload=True)
         
     class Meta:
         verbose_name = "Active Directory config"

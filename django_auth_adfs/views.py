@@ -7,7 +7,7 @@ from django.shortcuts import redirect
 from django.utils.http import is_safe_url
 from django.views.generic import View
 
-from django_auth_adfs.config import provider_config, settings
+from django_auth_adfs.config import provider_config
 from django_auth_adfs.exceptions import MFARequired
 
 logger = logging.getLogger("django_auth_adfs")
@@ -25,7 +25,7 @@ class OAuth2CallbackView(View):
         code = request.GET.get("code")
         if not code:
             # Return an error message
-            return settings.CUSTOM_FAILED_RESPONSE_VIEW(
+            return provider_config.settings.CUSTOM_FAILED_RESPONSE_VIEW(
                 request,
                 error_message="No authorization code was provided.",
                 status=400
@@ -46,7 +46,7 @@ class OAuth2CallbackView(View):
                 if redirect_to:
                     redirect_to = base64.urlsafe_b64decode(redirect_to.encode()).decode()
                 else:
-                    redirect_to = django_settings.LOGIN_REDIRECT_URL
+                    redirect_to = django_provider_config.settings.LOGIN_REDIRECT_URL
                 url_is_safe = is_safe_url(
                     url=redirect_to,
                     allowed_hosts=[request.get_host()],
@@ -56,14 +56,14 @@ class OAuth2CallbackView(View):
                 return redirect(redirect_to)
             else:
                 # Return a 'disabled account' error message
-                return settings.CUSTOM_FAILED_RESPONSE_VIEW(
+                return provider_config.settings.CUSTOM_FAILED_RESPONSE_VIEW(
                     request,
                     error_message="Your account is disabled.",
                     status=403
                 )
         else:
             # Return an 'invalid login' error message
-            return settings.CUSTOM_FAILED_RESPONSE_VIEW(
+            return provider_config.settings.CUSTOM_FAILED_RESPONSE_VIEW(
                 request,
                 error_message="Login failed.",
                 status=401
