@@ -46,7 +46,7 @@ class OAuth2CallbackView(View):
                 if redirect_to:
                     redirect_to = base64.urlsafe_b64decode(redirect_to.encode()).decode()
                 else:
-                    redirect_to = django_provider_config.settings.LOGIN_REDIRECT_URL
+                    redirect_to = django_settings.LOGIN_REDIRECT_URL
                 url_is_safe = is_safe_url(
                     url=redirect_to,
                     allowed_hosts=[request.get_host()],

@@ -53,6 +53,7 @@ class Settings(object):
 
     def __init__(self):
         # Set defaults
+        self.ENABLED = False
         self.AUDIENCE = None  # Required
         self.BLOCK_GUEST_USERS = False
         self.BOOLEAN_CLAIM_MAPPING = {}
@@ -82,7 +83,6 @@ class Settings(object):
         self.VERSION = 'v1.0'
 
         cls = django_settings.DEFAULT_AD_CONFIG_MODEL if hasattr(django_settings, "DEFAULT_AD_CONFIG_MODEL") else DEFAULT_AD_CONFIG_MODEL
-        table_name = cls.replace(".model.", "_").lower()
         if USE_MODEL_SETTINGS and not POST_MIGRATION:
             return
         elif USE_MODEL_SETTINGS:
@@ -100,7 +100,7 @@ class Settings(object):
                 self.CLAIM_MAPPING = {"first_name": "given_name",
                                     "last_name": "family_name",
                                     "email": "email"}
-
+                self.ENABLED = model_config.enabled
         else:
             required_settings = [
                 "AUDIENCE",
@@ -239,6 +239,9 @@ class ProviderConfig(object):
                 loaded = self._load_federation_metadata()
                 self._mode = "oauth2"
 
+            if not self.settings.ENABLED:
+                return
+                
             if not loaded:
                 if self._config_timestamp is None:
                     msg = "Could not load any data from ADFS server. " \
