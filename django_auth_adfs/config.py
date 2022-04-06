@@ -6,16 +6,17 @@ from xml.etree import ElementTree
 
 import requests
 import requests.adapters
-from urllib3.util.retry import Retry
 from cryptography.hazmat.backends.openssl.backend import backend
 from cryptography.x509 import load_der_x509_certificate
+from django.apps import apps
 from django.conf import settings as django_settings
-from django.contrib.auth import REDIRECT_FIELD_NAME
-from django.contrib.auth import get_user_model
+from django.contrib.auth import REDIRECT_FIELD_NAME, get_user_model
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connection
 from django.http import QueryDict
 from django.shortcuts import render
 from django.utils.module_loading import import_string
+from urllib3.util.retry import Retry
 
 try:
     from django.urls import reverse
@@ -26,7 +27,9 @@ logger = logging.getLogger("django_auth_adfs")
 
 AZURE_AD_SERVER = "login.microsoftonline.com"
 DEFAULT_SETTINGS_CLASS = 'django_auth_adfs.config.Settings'
-
+DEFAULT_AD_CONFIG_MODEL = "django_auth_adfs.models.ActiveDirectoryConfig"
+USE_MODEL_SETTINGS = getattr(django_settings, "AUTH_ADFS_MODEL_SETTINGS", False)
+POST_MIGRATION = len(connection.introspection.table_names())
 
 class ConfigLoadError(Exception):
     pass
@@ -36,10 +39,10 @@ def _get_settings_class():
     """
     Get the AUTH_ADFS setting from the Django settings.
     """
-    if not hasattr(django_settings, "AUTH_ADFS"):
+    if not USE_MODEL_SETTINGS and not hasattr(django_settings, "AUTH_ADFS"):
         msg = "The configuration directive 'AUTH_ADFS' was not found in your Django settings"
         raise ImproperlyConfigured(msg)
-    cls = django_settings.AUTH_ADFS.get('SETTINGS_CLASS', DEFAULT_SETTINGS_CLASS)
+    cls = django_settings.AUTH_ADFS.get('SETTINGS_CLASS', DEFAULT_SETTINGS_CLASS) if hasattr(django_settings, "AUTH_ADFS") else DEFAULT_SETTINGS_CLASS
     return import_string(cls)
 
 
@@ -78,99 +81,121 @@ class Settings(object):
 
         self.VERSION = 'v1.0'
 
-        required_settings = [
-            "AUDIENCE",
-            "CLIENT_ID",
-            "RELYING_PARTY_ID",
-            "USERNAME_CLAIM",
-        ]
+        cls = django_settings.DEFAULT_AD_CONFIG_MODEL if hasattr(django_settings, "DEFAULT_AD_CONFIG_MODEL") else DEFAULT_AD_CONFIG_MODEL
+        if USE_MODEL_SETTINGS and not POST_MIGRATION:
+            return
+        elif USE_MODEL_SETTINGS:
+            model_cls = import_string(cls)
+            model_config = model_cls.objects.first()
+            if model_config:
+                self.SERVER = AZURE_AD_SERVER
+                self.TENANT_ID = model_config.tenant_id
+                self.CLIENT_ID = model_config.client_id
+                self.CLIENT_SECRET = model_config.client_secret
+                self.AUDIENCE = model_config.client_id
+                self.RELYING_PARTY_ID = model_config.client_id
+                self.USERNAME_CLAIM = model_config.username_claim
+                self.GROUPS_CLAIM = model_config.groups_claim
+                self.CLAIM_MAPPING = {"first_name": "given_name",
+                                    "last_name": "family_name",
+                                    "email": "email"}
+        else:
+            required_settings = [
+                "AUDIENCE",
+                "CLIENT_ID",
+                "RELYING_PARTY_ID",
+                "USERNAME_CLAIM",
+            ]
 
-        deprecated_settings = {
-            "AUTHORIZE_PATH": "This setting is automatically loaded from ADFS.",
-            "ISSUER": "This setting is automatically loaded from ADFS.",
-            "LOGIN_REDIRECT_URL": "Instead use the standard Django settings with the same name.",
-            "REDIR_URI": "This setting is automatically determined based on the URL configuration of Django.",
-            "SIGNING_CERT": "The token signing certificates are automatically loaded from ADFS.",
-            "TOKEN_PATH": "This setting is automatically loaded from ADFS.",
-        }
+            deprecated_settings = {
+                "AUTHORIZE_PATH": "This setting is automatically loaded from ADFS.",
+                "ISSUER": "This setting is automatically loaded from ADFS.",
+                "LOGIN_REDIRECT_URL": "Instead use the standard Django settings with the same name.",
+                "REDIR_URI": "This setting is automatically determined based on the URL configuration of Django.",
+                "SIGNING_CERT": "The token signing certificates are automatically loaded from ADFS.",
+                "TOKEN_PATH": "This setting is automatically loaded from ADFS.",
+            }
 
-        if not hasattr(django_settings, "AUTH_ADFS"):
-            msg = "The configuration directive 'AUTH_ADFS' was not found in your Django settings"
-            raise ImproperlyConfigured(msg)
-        _settings = django_settings.AUTH_ADFS
-        # Settings class is loaded by now. Delete this setting
-        if "SETTINGS_CLASS" in _settings:
-            del _settings["SETTINGS_CLASS"]
-
-        # Handle deprecated settings
-        for setting, message in deprecated_settings.items():
-            if setting in _settings:
-                warnings.warn("Setting {} is deprecated and it's value was ignored. {}".format(setting, message),
-                              DeprecationWarning)
-                del _settings[setting]
-
-        if "CERT_MAX_AGE" in _settings:
-            _settings["CONFIG_RELOAD_INTERVAL"] = _settings["CERT_MAX_AGE"]
-            warnings.warn('Setting CERT_MAX_AGE has been renamed to CONFIG_RELOAD_INTERVAL. The value was copied.',
-                          DeprecationWarning)
-            del _settings["CERT_MAX_AGE"]
-
-        if "GROUP_CLAIM" in _settings:
-            _settings["GROUPS_CLAIM"] = _settings["GROUP_CLAIM"]
-            warnings.warn('Setting GROUP_CLAIM has been renamed to GROUPS_CLAIM. The value was copied.',
-                          DeprecationWarning)
-            del _settings["GROUP_CLAIM"]
-
-        if "RESOURCE" in _settings:
-            _settings["RELYING_PARTY_ID"] = _settings["RESOURCE"]
-            del _settings["RESOURCE"]
-        if "TENANT_ID" in _settings:
-            # If a tenant ID was set, switch to Azure AD mode
-            if "SERVER" in _settings:
-                raise ImproperlyConfigured("The SERVER cannot be set when TENANT_ID is set.")
-            self.SERVER = AZURE_AD_SERVER
-            self.USERNAME_CLAIM = "upn"
-            self.GROUPS_CLAIM = "groups"
-            self.CLAIM_MAPPING = {"first_name": "given_name",
-                                  "last_name": "family_name",
-                                  "email": "email"}
-        elif "VERSION" in _settings:
-            raise ImproperlyConfigured("The VERSION cannot be set when TENANT_ID is not set.")
-
-        # Overwrite defaults with user settings
-        for setting, value in _settings.items():
-            if hasattr(self, setting):
-                setattr(self, setting, value)
-            else:
-                msg = "'{0}' is not a valid configuration directive for django_auth_adfs."
-                raise ImproperlyConfigured(msg.format(setting))
-
-        if self.SERVER != AZURE_AD_SERVER and self.BLOCK_GUEST_USERS:
-            raise ImproperlyConfigured("You can only set BLOCK_GUEST_USERS when self.TENANT_ID is set")
-
-        if self.TENANT_ID is None:
-            # For on premises ADFS, the tenant ID is set to adfs
-            # On AzureAD the adfs part in the URL happens to be replace by the tenant ID.
-            self.TENANT_ID = "adfs"
-
-        for setting in required_settings:
-            if not getattr(self, setting):
-                msg = "django_auth_adfs setting '{0}' has not been set".format(setting)
+            if not hasattr(django_settings, "AUTH_ADFS"):
+                msg = "The configuration directive 'AUTH_ADFS' was not found in your Django settings"
                 raise ImproperlyConfigured(msg)
+            _settings = django_settings.AUTH_ADFS
+            # Settings class is loaded by now. Delete this setting
+            if "SETTINGS_CLASS" in _settings:
+                del _settings["SETTINGS_CLASS"]
 
-        # Setup dynamic settings
-        if not callable(self.CUSTOM_FAILED_RESPONSE_VIEW):
-            self.CUSTOM_FAILED_RESPONSE_VIEW = import_string(self.CUSTOM_FAILED_RESPONSE_VIEW)
+            # Handle deprecated settings
+            for setting, message in deprecated_settings.items():
+                if setting in _settings:
+                    warnings.warn("Setting {} is deprecated and it's value was ignored. {}".format(setting, message),
+                                DeprecationWarning)
+                    del _settings[setting]
 
-        # Validate setting conflicts
-        usermodel = get_user_model()
-        if usermodel.USERNAME_FIELD in self.CLAIM_MAPPING:
-            raise ImproperlyConfigured("You cannot set the username field of the user model from "
-                                       "the CLAIM_MAPPING setting. Instead use the USERNAME_CLAIM setting.")
+            if "CERT_MAX_AGE" in _settings:
+                _settings["CONFIG_RELOAD_INTERVAL"] = _settings["CERT_MAX_AGE"]
+                warnings.warn('Setting CERT_MAX_AGE has been renamed to CONFIG_RELOAD_INTERVAL. The value was copied.',
+                            DeprecationWarning)
+                del _settings["CERT_MAX_AGE"]
+
+            if "GROUP_CLAIM" in _settings:
+                _settings["GROUPS_CLAIM"] = _settings["GROUP_CLAIM"]
+                warnings.warn('Setting GROUP_CLAIM has been renamed to GROUPS_CLAIM. The value was copied.',
+                            DeprecationWarning)
+                del _settings["GROUP_CLAIM"]
+
+            if "RESOURCE" in _settings:
+                _settings["RELYING_PARTY_ID"] = _settings["RESOURCE"]
+                del _settings["RESOURCE"]
+            if "TENANT_ID" in _settings:
+                # If a tenant ID was set, switch to Azure AD mode
+                if "SERVER" in _settings:
+                    raise ImproperlyConfigured("The SERVER cannot be set when TENANT_ID is set.")
+                self.SERVER = AZURE_AD_SERVER
+                self.USERNAME_CLAIM = "upn"
+                self.GROUPS_CLAIM = "groups"
+                self.CLAIM_MAPPING = {"first_name": "given_name",
+                                    "last_name": "family_name",
+                                    "email": "email"}
+            elif "VERSION" in _settings:
+                raise ImproperlyConfigured("The VERSION cannot be set when TENANT_ID is set.")
+
+            # Overwrite defaults with user settings
+            for setting, value in _settings.items():
+                if hasattr(self, setting):
+                    setattr(self, setting, value)
+                else:
+                    msg = "'{0}' is not a valid configuration directive for django_auth_adfs."
+                    raise ImproperlyConfigured(msg.format(setting))
+
+            if self.SERVER != AZURE_AD_SERVER and self.BLOCK_GUEST_USERS:
+                raise ImproperlyConfigured("You can only set BLOCK_GUEST_USERS when self.TENANT_ID is set")
+
+            if self.TENANT_ID is None:
+                # For on premises ADFS, the tenant ID is set to adfs
+                # On AzureAD the adfs part in the URL happens to be replace by the tenant ID.
+                self.TENANT_ID = "adfs"
+
+            for setting in required_settings:
+                if not getattr(self, setting):
+                    msg = "django_auth_adfs setting '{0}' has not been set".format(setting)
+                    raise ImproperlyConfigured(msg)
+
+            # Setup dynamic settings
+            if not callable(self.CUSTOM_FAILED_RESPONSE_VIEW):
+                self.CUSTOM_FAILED_RESPONSE_VIEW = import_string(self.CUSTOM_FAILED_RESPONSE_VIEW)
+
+            # Validate setting conflicts
+            usermodel = get_user_model()
+            if usermodel.USERNAME_FIELD in self.CLAIM_MAPPING:
+                raise ImproperlyConfigured("You cannot set the username field of the user model from "
+                                        "the CLAIM_MAPPING setting. Instead use the USERNAME_CLAIM setting.")
 
 
 class ProviderConfig(object):
     def __init__(self):
+        settings_cls = _get_settings_class()
+        self.settings = settings_cls()
+
         self._config_timestamp = None
         self._mode = None
 
@@ -179,27 +204,31 @@ class ProviderConfig(object):
         self.token_endpoint = None
         self.end_session_endpoint = None
         self.issuer = None
-
+        
         allowed_methods = frozenset([
             'HEAD', 'GET', 'PUT', 'DELETE', 'OPTIONS', 'TRACE', 'POST'
         ])
 
         retry = Retry(
-            total=settings.RETRIES,
-            read=settings.RETRIES,
-            connect=settings.RETRIES,
+            total=self.settings.RETRIES,
+            read=self.settings.RETRIES,
+            connect=self.settings.RETRIES,
             backoff_factor=0.3,
             allowed_methods=allowed_methods
         )
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(max_retries=retry)
         self.session.mount('https://', adapter)
-        self.session.verify = settings.CA_BUNDLE
+        self.session.verify = self.settings.CA_BUNDLE
 
-    def load_config(self):
+    def load_config(self, force_reload=False):
         # If loaded data is too old, reload it again
-        refresh_time = datetime.now() - timedelta(hours=settings.CONFIG_RELOAD_INTERVAL)
-        if self._config_timestamp is None or self._config_timestamp < refresh_time:
+        refresh_time = datetime.now() - timedelta(hours=self.settings.CONFIG_RELOAD_INTERVAL)
+        if self._config_timestamp is None or self._config_timestamp < refresh_time or force_reload:
+            # reload settings
+            settings_cls = _get_settings_class()
+            self.settings = settings_cls()
+
             logger.debug("Loading django_auth_adfs ID Provider configuration.")
             try:
                 loaded = self._load_openid_config()
@@ -228,22 +257,22 @@ class ProviderConfig(object):
             logger.info("issuer:                 %s", self.issuer)
 
     def _load_openid_config(self):
-        if settings.VERSION != 'v1.0':
+        if self.settings.VERSION != 'v1.0':
             config_url = "https://{}/{}/{}/.well-known/openid-configuration?appid={}".format(
-                settings.SERVER, settings.TENANT_ID, settings.VERSION, settings.CLIENT_ID
+                self.settings.SERVER, self.settings.TENANT_ID, self.settings.VERSION, self.settings.CLIENT_ID
             )
         else:
             config_url = "https://{}/{}/.well-known/openid-configuration?appid={}".format(
-                settings.SERVER, settings.TENANT_ID, settings.CLIENT_ID
+                self.settings.SERVER, self.settings.TENANT_ID, self.settings.CLIENT_ID
             )
 
         try:
             logger.info("Trying to get OpenID Connect config from %s", config_url)
-            response = self.session.get(config_url, timeout=settings.TIMEOUT)
+            response = self.session.get(config_url, timeout=self.settings.TIMEOUT)
             response.raise_for_status()
             openid_cfg = response.json()
 
-            response = self.session.get(openid_cfg["jwks_uri"], timeout=settings.TIMEOUT)
+            response = self.session.get(openid_cfg["jwks_uri"], timeout=self.settings.TIMEOUT)
             response.raise_for_status()
             signing_certificates = [x["x5c"][0] for x in response.json()["keys"] if x.get("use", "sig") == "sig"]
             #                               ^^^
@@ -257,7 +286,7 @@ class ProviderConfig(object):
             self.authorization_endpoint = openid_cfg["authorization_endpoint"]
             self.token_endpoint = openid_cfg["token_endpoint"]
             self.end_session_endpoint = openid_cfg["end_session_endpoint"]
-            if settings.TENANT_ID != 'adfs':
+            if self.settings.TENANT_ID != 'adfs':
                 self.issuer = openid_cfg["issuer"]
             else:
                 self.issuer = openid_cfg["access_token_issuer"]
@@ -266,16 +295,16 @@ class ProviderConfig(object):
         return True
 
     def _load_federation_metadata(self):
-        server_url = "https://{}".format(settings.SERVER)
-        base_url = "{}/{}".format(server_url, settings.TENANT_ID)
-        if settings.TENANT_ID == "adfs":
+        server_url = "https://{}".format(self.settings.SERVER)
+        base_url = "{}/{}".format(server_url, self.settings.TENANT_ID)
+        if self.settings.TENANT_ID == "adfs":
             adfs_config_url = server_url + "/FederationMetadata/2007-06/FederationMetadata.xml"
         else:
             adfs_config_url = base_url + "/FederationMetadata/2007-06/FederationMetadata.xml"
 
         try:
             logger.info("Trying to get ADFS Metadata file %s", adfs_config_url)
-            response = self.session.get(adfs_config_url, timeout=settings.TIMEOUT)
+            response = self.session.get(adfs_config_url, timeout=self.settings.TIMEOUT)
             response.raise_for_status()
         except requests.HTTPError:
             raise ConfigLoadError
@@ -331,14 +360,14 @@ class ProviderConfig(object):
         query = QueryDict(mutable=True)
         query.update({
             "response_type": "code",
-            "client_id": settings.CLIENT_ID,
-            "resource": settings.RELYING_PARTY_ID,
+            "client_id": self.settings.CLIENT_ID,
+            "resource": self.settings.RELYING_PARTY_ID,
             "redirect_uri": self.redirect_uri(request),
             "state": redirect_to,
         })
         if self._mode == "openid_connect":
             query["scope"] = "openid"
-            if (disable_sso is None and settings.DISABLE_SSO) or disable_sso is True:
+            if (disable_sso is None and self.settings.DISABLE_SSO) or disable_sso is True:
                 query["prompt"] = "login"
             if force_mfa:
                 query["amr_values"] = "ngcmfa"
@@ -357,6 +386,4 @@ class ProviderConfig(object):
         return self.end_session_endpoint
 
 
-settings_cls = _get_settings_class()
-settings = settings_cls()
 provider_config = ProviderConfig()
