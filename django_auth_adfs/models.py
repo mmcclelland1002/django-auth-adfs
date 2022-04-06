@@ -16,6 +16,7 @@ class ActiveDirectoryConfig(models.Model):
         (USERNAME_CLAIM, "UPN"),
     )
 
+
     client_id = models.CharField(max_length=255)
     client_secret = models.CharField(max_length=255)
     tenant_id = models.CharField(max_length=255)

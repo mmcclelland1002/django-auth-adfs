@@ -29,6 +29,7 @@ AZURE_AD_SERVER = "login.microsoftonline.com"
 DEFAULT_SETTINGS_CLASS = 'django_auth_adfs.config.Settings'
 DEFAULT_AD_CONFIG_MODEL = "django_auth_adfs.models.ActiveDirectoryConfig"
 USE_MODEL_SETTINGS = getattr(django_settings, "AUTH_ADFS_MODEL_SETTINGS", False)
+
 POST_MIGRATION = len(connection.introspection.table_names())
 
 class ConfigLoadError(Exception):
@@ -53,6 +54,7 @@ class Settings(object):
 
     def __init__(self):
         # Set defaults
+        self.ENABLED = False
         self.AUDIENCE = None  # Required
         self.BLOCK_GUEST_USERS = False
         self.BOOLEAN_CLAIM_MAPPING = {}
@@ -237,6 +239,9 @@ class ProviderConfig(object):
                 loaded = self._load_federation_metadata()
                 self._mode = "oauth2"
 
+            if not self.settings.ENABLED:
+                return
+                
             if not loaded:
                 if self._config_timestamp is None:
                     msg = "Could not load any data from ADFS server. " \
