@@ -1,3 +1,4 @@
+from django.contrib.auth.models import Group
 from django.db import models
 
 
@@ -23,7 +24,7 @@ class ActiveDirectoryConfig(models.Model):
     groups_claim = models.CharField(max_length=255, choices=GROUPS_CLAIM_CHOICES, default=GROUPS_CLAIM_CHOICES[0][0])
     username_claim = models.CharField(max_length=255, choices=USERNAME_CLAIM_CHOICES, default=USERNAME_CLAIM_CHOICES[0][0])
 
-    def __str__(self) -> str:
+    def __str__(self):
         return self.tenant_id or ""
 
     def save(self,*args, **kwargs):
@@ -34,3 +35,11 @@ class ActiveDirectoryConfig(models.Model):
     class Meta:
         verbose_name = "Active Directory config"
         verbose_name_plural = "Active Directory config"
+
+
+class GroupMapping(models.Model):
+    groups_claim = models.CharField("Groups Claim", max_length=55)
+    groups = models.ManyToManyField(Group, blank=True)
+
+    def __str__(self):
+        return self.groups_claim
